@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2024 Open Source Robotics Foundation, Inc.
+# Copyright 2026 Open Source Robotics Foundation, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,19 +19,18 @@ import sys
 import time
 
 from free_fleet.ros2_types import (
-    GeometryMsgs_Point,
-    GeometryMsgs_Pose,
-    GeometryMsgs_PoseStamped,
-    GeometryMsgs_Quaternion,
-    Header,
-    Time,
-
-    GoalStatus,
     DockRobot_Feedback,
     DockRobot_GetResult_Request,
     DockRobot_GetResult_Response,
     DockRobot_SendGoal_Request,
     DockRobot_SendGoal_Response,
+    GeometryMsgs_Point,
+    GeometryMsgs_Pose,
+    GeometryMsgs_PoseStamped,
+    GeometryMsgs_Quaternion,
+    GoalStatus,
+    Header,
+    Time,
 )
 from free_fleet.utils import namespacify
 
@@ -57,7 +56,8 @@ def main(argv=sys.argv):
     parser.add_argument('--namespace', '-n', type=str, default='')
     parser.add_argument('--frame-id', '-f', type=str, default='map')
     parser.add_argument('--dock', type=str, default='')
-    parser.add_argument('--stage', type=bool, default=True)
+    parser.add_argument('--no-staging', dest='stage', action='store_false',
+                        help='Do not navigate to the staging pose before docking')
     parser.add_argument('--staging_time', type=float, default=1000.0)
 
     args = parser.parse_args()
@@ -85,7 +85,7 @@ def main(argv=sys.argv):
     pose_stamped = GeometryMsgs_PoseStamped(header=header, pose=pose)
 
     goal_id = np.random.randint(0, 255, size=(16)).astype('uint8').tolist()
-    print(f'{goal_id}: sending goal to dock to {args.dock} [navigate to staging pose: {args.stage}]')
+    print(f'{goal_id}: sending goal to dock to {args.dock} [nav to staging pose: {args.stage}]')
     req = DockRobot_SendGoal_Request(
         goal_id=goal_id,
         use_dock_id=True,

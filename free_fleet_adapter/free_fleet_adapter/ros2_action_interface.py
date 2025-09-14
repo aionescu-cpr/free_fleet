@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2024 Open Source Robotics Foundation, Inc.
+# Copyright 2026 Open Source Robotics Foundation, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,9 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
-
 from abc import ABC, abstractmethod
+
 from free_fleet.ros2_types import (
     ActionMsgs_CancelGoal_Response,
     DockRobot_Feedback,
@@ -45,7 +44,7 @@ from free_fleet_adapter.robot_adapter import (
     ExecutionFeedback,
     ExecutionHandle
 )
-from geometry_msgs.msg import PoseStamped
+import numpy as np
 from tf_transformations import quaternion_from_euler
 
 
@@ -57,8 +56,8 @@ class RequestRejected(Exception):
     pass
 
 
-class ExecutionItem(ABC):
-    """Abstract Nav 2 execution item."""
+class Ros2ActionInterface(ABC):
+    """Abstract interface to execute a ROS 2 action."""
 
     @abstractmethod
     def execute(self):
@@ -81,14 +80,16 @@ class ExecutionItem(ABC):
         ...
 
     @abstractmethod
-    def get_action_string(self):
+    def get_action_name(self):
         ...
 
 
-class NavigationExecutionItem(ExecutionItem):
-    """Base class of navigation request."""
+class NavigationActionInterface(Ros2ActionInterface):
+    """Base class of an interface for navigation related ROS 2 actions."""
 
-    def __init__(self, robot_name, node, update_handle, zenoh_session, exec_handle, service_timeout):
+    def __init__(
+            self, robot_name, node, update_handle, zenoh_session,
+            exec_handle, service_timeout):
         self.robot_name = robot_name
         self.node = node
         self.update_handle = update_handle
@@ -125,14 +126,20 @@ class NavigationExecutionItem(ExecutionItem):
 
         return None
 
+    def get_activity(self):
+        if self.exec_handle:
+            return self.exec_handle.activity
+
+        return None
+
     def execute(self):
-        action_string = self.get_action_string()
+        action_name = self.get_action_name()
         req = self._create_ros2_action_send_goal_request()
 
         nav_goal_id = req.goal_id
 
         replies = self.zenoh_session.get(
-            namespacify(f'{action_string}/_action/send_goal', self.robot_name),
+            namespacify(f'{action_name}/_action/send_goal', self.robot_name),
             payload=req.serialize(),
             timeout=self.service_call_timeout_sec
         )
@@ -150,25 +157,25 @@ class NavigationExecutionItem(ExecutionItem):
             else:
                 if rep.accepted:
                     self.node.get_logger().info(
-                        f'{action_string} goal {nav_goal_id} accepted'
+                        f'{action_name} goal {nav_goal_id} accepted'
                     )
                     self.exec_handle.set_goal_id(nav_goal_id)
                     return
 
                 self.node.get_logger().error(
-                    f'{action_string} goal {nav_goal_id} was rejected'
+                    f'{action_name} goal {nav_goal_id} was rejected'
                 )
                 raise RequestRejected
 
     def feedback(self, action, payload):
-        if action != self.get_action_string():
+        if action != self.get_action_name():
             return
 
-        if self.exec_handle is None or self.exec_handle.execution or self.exec_handle.goal_id is None:
+        if (self.exec_handle is None or
+                self.exec_handle.goal_id is None):
             return
 
-        feedback = self._parse_ros2_action_feedback(
-            payload.payload.to_bytes())
+        feedback = self._parse_ros2_action_feedback(payload)
         self.exec_handle.last_received_feedback = ExecutionFeedback(
             feedback,
             self.node.get_clock().now().seconds_nanoseconds()[0])
@@ -194,11 +201,11 @@ class NavigationExecutionItem(ExecutionItem):
             if estimated_completion_sec > self.node.get_clock().now().seconds_nanoseconds()[0]:
                 return (False, None)
 
-        action_string = self.get_action_string()
+        action_name = self.get_action_name()
         req = self._create_ros2_action_get_result_request(goal_id=self.exec_handle.goal_id)
 
         replies = self.zenoh_session.get(
-            namespacify(f'{action_string}/_action/get_result', self.robot_name),
+            namespacify(f'{action_name}/_action/get_result', self.robot_name),
             payload=req.serialize(),
             timeout=self.service_call_timeout_sec
         )
@@ -208,9 +215,10 @@ class NavigationExecutionItem(ExecutionItem):
                 # TODO: reply.ok may not always be set and should be handled appropriately
                 rep = self._parse_ros2_action_get_result_response(reply.ok.payload.to_bytes())
             except Exception as e:
+                err_payload = reply.err.payload.to_string() \
+                    if reply.err else '[reply error not set]'
                 self.node.get_logger().debug(
-                    f'Received (ERROR: "{reply.err.payload.to_string()}"): '
-                    f'{type(e)}: {e}')
+                    f'Received (ERROR: "{err_payload}"): {type(e)}: {e}')
                 continue
             else:
                 self.node.get_logger().debug(f'Result: {rep.status}')
@@ -221,31 +229,31 @@ class NavigationExecutionItem(ExecutionItem):
                         return (False, None)
                     case GoalStatus.STATUS_SUCCEEDED.value:
                         self.node.get_logger().info(
-                            f'{action_string} goal {self.exec_handle.goal_id} reached'
+                            f'{action_name} goal {self.exec_handle.goal_id} reached'
                         )
                         return (True, True)
                     case GoalStatus.STATUS_CANCELED.value:
                         self.node.get_logger().info(
-                            f'{action_string} goal {self.exec_handle.goal_id} was cancelled'
+                            f'{action_name} goal {self.exec_handle.goal_id} was cancelled'
                         )
                         return (True, False)
                     case _:
                         self.node.get_logger().error(
-                            f'{action_string} goal {self.exec_handle.goal_id} status '
+                            f'{action_name} goal {self.exec_handle.goal_id} status '
                             f'{rep.status}'
                         )
-                        raise RequestAborted(f'{action_string} result status [{rep.status}]')
+                        raise RequestAborted(f'{action_name} result status [{rep.status}]')
         return (False, None)
 
     def stop(self):
         if self.exec_handle is not None:
             with self.exec_handle.mutex:
-                if self.exec_handle.execution is not None and self.exec_handle.goal_id is not None:
-                    action_string = self.get_action_string()
+                if self.exec_handle.goal_id is not None:
+                    action_name = self.get_action_name()
                     req = make_nav2_cancel_all_goals_request()
                     replies = self.zenoh_session.get(
                         namespacify(
-                            f'{action_string}/_action/cancel_goal',
+                            f'{action_name}/_action/cancel_goal',
                             self.robot_name,
                         ),
                         payload=req.serialize(),
@@ -258,9 +266,12 @@ class NavigationExecutionItem(ExecutionItem):
                         self.node.get_logger().info(
                             'Return code: %d' % rep.return_code
                         )
+                    self.exec_handle.last_received_feedback = None
 
 
-class NavigateToPoseExecutionItem(NavigationExecutionItem):
+class NavigateToPoseActionInterface(NavigationActionInterface):
+    """Interface to execute a NavigateToPose ROS 2 action."""
+
     def __init__(
         self,
         robot_name,
@@ -275,14 +286,15 @@ class NavigateToPoseExecutionItem(NavigationExecutionItem):
         z: float,
         yaw: float
     ):
-        super().__init__(robot_name, node, update_handle, zenoh_session, exec_handle, service_timeout)
+        super().__init__(
+            robot_name, node, update_handle, zenoh_session, exec_handle, service_timeout)
         self.map_frame = map_frame
         self.x = x
         self.y = y
         self.z = z
         self.yaw = yaw
 
-    def get_action_string(self):
+    def get_action_name(self):
         return 'navigate_to_pose'
 
     def _create_ros2_action_send_goal_request(self):
@@ -319,10 +331,19 @@ class NavigateToPoseExecutionItem(NavigationExecutionItem):
         return NavigateToPose_Feedback.deserialize(payload)
 
 
-class DockExecutionItem(NavigationExecutionItem):
+class DockActionInterface(NavigationActionInterface):
+    """Interface to execute a Dock ROS 2 action."""
+
     DEFAULT_DOCK_ACTION_USE_DOCK_ID = True
-    # since dock ID is used, a dock pose is not required but it needs to be provided to satisfy the API
-    DEFAULT_DOCK_ACTION_POSE = PoseStamped()
+    # since dock ID is used, a dock pose is not required but
+    # it needs to be provided to satisfy the API
+    DEFAULT_DOCK_ACTION_POSE = GeometryMsgs_PoseStamped(
+        header=Header(stamp=Time(sec=0, nanosec=0), frame_id=''),
+        pose=GeometryMsgs_Pose(
+            position=GeometryMsgs_Point(x=0.0, y=0.0, z=0.0),
+            orientation=GeometryMsgs_Quaternion()
+        )
+    )
     DEFAULT_DOCK_ACTION_DOCK_TYPE = ''
 
     # the following are the default values in the DockRobot ROS 2 action
@@ -336,24 +357,25 @@ class DockExecutionItem(NavigationExecutionItem):
         update_handle,
         zenoh_session,
         exec_handle: ExecutionHandle,
-        dock_id: str,
-        service_timeout: float
+        service_timeout: float,
+        dock_id: str
     ):
-        super().__init__(robot_name, node, update_handle, zenoh_session, exec_handle, service_timeout)
+        super().__init__(
+            robot_name, node, update_handle, zenoh_session, exec_handle, service_timeout)
         self.dock_id = dock_id
 
-    def get_action_string(self):
+    def get_action_name(self):
         return 'dock_robot'
 
     def _create_ros2_action_send_goal_request(self):
         return DockRobot_SendGoal_Request(
             goal_id=self._generate_goal_id(),
             dock_id=self.dock_id,
-            use_dock_id=DockExecutionItem.DEFAULT_DOCK_ACTION_USE_DOCK_ID,
-            dock_pose=DockExecutionItem.DEFAULT_DOCK_ACTION_POSE,
-            dock_type=DockExecutionItem.DEFAULT_DOCK_ACTION_DOCK_TYPE,
-            max_staging_time=DockExecutionItem.DEFAULT_DOCK_ACTION_MAX_STAGING_TIME,
-            navigate_to_staging_pose=DockExecutionItem.DEFAULT_DOCK_ACTION_NAVIGATE_TO_STAGING_POSE,
+            use_dock_id=self.DEFAULT_DOCK_ACTION_USE_DOCK_ID,
+            dock_pose=self.DEFAULT_DOCK_ACTION_POSE,
+            dock_type=self.DEFAULT_DOCK_ACTION_DOCK_TYPE,
+            max_staging_time=self.DEFAULT_DOCK_ACTION_MAX_STAGING_TIME,
+            navigate_to_staging_pose=self.DEFAULT_DOCK_ACTION_NAVIGATE_TO_STAGING_POSE,
         )
 
     def _parse_ros2_action_send_goal_response(self, payload):

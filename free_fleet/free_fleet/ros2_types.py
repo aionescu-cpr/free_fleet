@@ -73,17 +73,6 @@ class GeometryMsgs_PoseStamped(IdlStruct):
     pose: GeometryMsgs_Pose
 
 
-# https://github.com/ros2/rcl/blob/rolling/rcl_action/include/rcl_action/types.h
-class GoalStatus(Enum):
-    STATUS_UNKNOWN: pycdr2.types.int8 = 0
-    STATUS_ACCEPTED: pycdr2.types.int8 = 1
-    STATUS_EXECUTING: pycdr2.types.int8 = 2
-    STATUS_CANCELING: pycdr2.types.int8 = 3
-    STATUS_SUCCEEDED: pycdr2.types.int8 = 4
-    STATUS_CANCELED: pycdr2.types.int8 = 5
-    STATUS_ABORTED: pycdr2.types.int8 = 6
-
-
 # https://github.com/ros-navigation/navigation2/blob/main/nav2_msgs/action/NavigateToPose.action
 @dataclass
 class NavigateToPose_SendGoal_Request(IdlStruct):
@@ -103,6 +92,17 @@ class NavigateToPose_SendGoal_Response(IdlStruct):
 @dataclass
 class NavigateToPose_GetResult_Request(IdlStruct):
     goal_id: pycdr2.types.array[pycdr2.types.uint8, 16]
+
+
+# https://github.com/ros2/rcl/blob/rolling/rcl_action/include/rcl_action/types.h
+class GoalStatus(Enum):
+    STATUS_UNKNOWN: pycdr2.types.int8 = 0
+    STATUS_ACCEPTED: pycdr2.types.int8 = 1
+    STATUS_EXECUTING: pycdr2.types.int8 = 2
+    STATUS_CANCELING: pycdr2.types.int8 = 3
+    STATUS_SUCCEEDED: pycdr2.types.int8 = 4
+    STATUS_CANCELED: pycdr2.types.int8 = 5
+    STATUS_ABORTED: pycdr2.types.int8 = 6
 
 
 # https://design.ros2.org/articles/actions.html#get-result-service

@@ -29,17 +29,16 @@ from free_fleet_adapter.action import (
     RobotActionContext,
     RobotActionState,
 )
-from free_fleet_adapter.nav2_execution_item import (
-    DockExecutionItem,
-    NavigationExecutionItem,
-    NavigateToPoseExecutionItem,
-    RequestAborted,
-    RequestRejected,
-)
 from free_fleet_adapter.robot_adapter import (
-    ExecutionFeedback,
     ExecutionHandle,
     RobotAdapter
+)
+from free_fleet_adapter.ros2_action_interface import (
+    DockActionInterface,
+    NavigateToPoseActionInterface,
+    NavigationActionInterface,
+    RequestAborted,
+    RequestRejected,
 )
 
 from geometry_msgs.msg import TransformStamped
@@ -105,6 +104,7 @@ class Nav2TfHandler:
 
 class Nav2RobotAdapter(RobotAdapter):
     MAX_REPLAN_COUNTS = 5
+    DEFAULT_SERVICE_CALL_TIMEOUT_SEC = 1.0
 
     def __init__(
         self,
@@ -130,15 +130,15 @@ class Nav2RobotAdapter(RobotAdapter):
         self.exec_handle: ExecutionHandle | None = None
 
         # tracks active navigation execution requests
-        self.nav_handle: NavigationExecutionItem | None = None
+        self.nav_handle: NavigationActionInterface | None = None
 
         self.map_name = self.robot_config_yaml['initial_map']
         default_map_frame = 'map'
         default_robot_frame = 'base_footprint'
         self.map_frame = self.robot_config_yaml.get('map_frame', default_map_frame)
         self.robot_frame = self.robot_config_yaml.get('robot_frame', default_robot_frame)
-        self.service_call_timeout_sec = \
-            self.robot_config_yaml.get('service_call_timeout_sec', None)
+        self.service_call_timeout_sec = self.robot_config_yaml.get(
+            'service_call_timeout_sec', self.DEFAULT_SERVICE_CALL_TIMEOUT_SEC)
 
         # TODO(ac): Only use full battery if sim is indicated
         self.battery_soc = 1.0
@@ -296,7 +296,7 @@ class Nav2RobotAdapter(RobotAdapter):
                         f'actions associated with this plugin.'
                     )
 
-    def _action_feedback_callback(action_string: str, sample: zenoh.Sample):
+    def _action_feedback_callback(self, action_string: str, sample: zenoh.Sample):
         if self.nav_handle is None:
             return
 
@@ -307,7 +307,7 @@ class Nav2RobotAdapter(RobotAdapter):
             return
 
         subscriber = self.zenoh_session.declare_subscriber(
-            namespacify(f'{action_string}_action/feedback', self.name),
+            namespacify(f'{action_string}/_action/feedback', self.name),
             lambda sample: self._action_feedback_callback(action_string, sample)
         )
         self.action_feedback_subscribers[action_string] = subscriber
@@ -371,7 +371,8 @@ class Nav2RobotAdapter(RobotAdapter):
             try:
                 is_done, succeeded = nav_handle.update(state)
                 if is_done:
-                    self._replan_counts = 0
+                    self.nav_handle = None
+                    self.replan_counts = 0
                     if succeeded:
                         if self.nav_issue_ticket is not None:
                             msg = {}
@@ -388,6 +389,8 @@ class Nav2RobotAdapter(RobotAdapter):
                 )
                 self._trigger_replan()
 
+            activity_identifier = nav_handle.get_activity()
+
         elif exec_handle:
             # Handle custom actions
             if exec_handle.execution and exec_handle.action:
@@ -402,6 +405,7 @@ class Nav2RobotAdapter(RobotAdapter):
                         )
                         exec_handle.execution.finished()
                         exec_handle.action = None
+                        self.exec_handle = None
             # Commands are still being carried out
             activity_identifier = exec_handle.activity
 
@@ -413,41 +417,50 @@ class Nav2RobotAdapter(RobotAdapter):
         execution: rmf_easy.CommandExecution
     ):
         self._request_nav_stop()
-        self.node.get_logger().info(
-            f'Commanding [{self.name}] to navigate to {destination.position} '
-            f'on map [{destination.map}]'
-        )
 
         if destination.map != self.map_name:
             # TODO(ac): test this map related replanning behavior
-            self.replan_counts += 1
             self.node.get_logger().error(
-                f'Destination is on map [{destination.map_name}], while robot '
+                f'Destination is on map [{destination.map}], while robot '
                 f'[{self.name}] is on map [{self.map_name}]'
             )
             self._trigger_replan()
             return
 
         if destination.dock is not None:
-            self.nav_handle = DockExecutionItem(
-                self.name, self.node, self.update_handle, self.zenoh_session, ExecutionHandle(execution),
-                destination.dock
+            self.node.get_logger().info(
+                f'Commanding [{self.name}] to navigate to {destination.dock} '
+                f'on map [{destination.map}]'
+            )
+
+            self.nav_handle = DockActionInterface(
+                self.name, self.node, self.update_handle, self.zenoh_session,
+                ExecutionHandle(execution),
+                self.service_call_timeout_sec,
+                destination.dock,
             )
         else:
-            self.nav_handle = NavigateToPoseExecutionItem(
-                self.name, self.node, self.update_handle, self.zenoh_session, ExecutionHandle(execution),
+            self.node.get_logger().info(
+                f'Commanding [{self.name}] to navigate to {destination.position} '
+                f'on map [{destination.map}]'
+            )
+
+            self.nav_handle = NavigateToPoseActionInterface(
+                self.name, self.node, self.update_handle, self.zenoh_session,
+                ExecutionHandle(execution),
+                self.service_call_timeout_sec,
                 self.map_frame,
                 destination.position[0],
                 destination.position[1],
                 0.0,
-                destination.position[2]
+                destination.position[2],
             )
 
-        action_string = self.nav_handle.get_action_string()
+        action_name = self.nav_handle.get_action_name()
 
         try:
             self.nav_handle.execute()
-            self._setup_action_feedback_subscriber(action_string)
+            self._setup_action_feedback_subscriber(action_name)
         except RequestRejected:
             self._trigger_replan()
 
@@ -514,10 +527,10 @@ class Nav2RobotAdapter(RobotAdapter):
         raise NotImplementedError(error_message)
 
     def _trigger_replan(self):
-        if self._replan_counts < self.MAX_REPLAN_COUNTS:
-            self._replan_counts += 1
+        if self.replan_counts < self.MAX_REPLAN_COUNTS:
+            self.replan_counts += 1
             self.node.get_logger().info(
-                f'Replanning navigation for robot {self.name}, attempt {self._replan_counts}'
+                f'Replanning navigation for robot {self.name}, attempt {self.replan_counts}'
             )
 
             if self.update_handle is None:
@@ -533,4 +546,4 @@ class Nav2RobotAdapter(RobotAdapter):
             self.node.get_logger().error(
                 f'Maximum replanning attempts reached for robot {self.name}'
             )
-            self._replan_counts = 0
+            self.replan_counts = 0
